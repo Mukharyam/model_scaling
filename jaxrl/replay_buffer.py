@@ -229,8 +229,6 @@ class ParallelReplayBuffer(AbstractReplayBuffer):
 
 
 class NStepParallelReplayBuffer(AbstractReplayBuffer):
-    """Note: this may be buggy."""
-
     def __init__(
         self,
         observation_space: gym.spaces.Box,
@@ -267,29 +265,46 @@ class NStepParallelReplayBuffer(AbstractReplayBuffer):
         done_float: float,
         next_observation: np.ndarray,
     ):
-        self.nstep_buffer.append((observation, action, reward, mask, done_float, next_observation))
+        episode_done = (mask == 0.0) | (done_float == 1.0)
+        self.nstep_buffer.append((observation, action, reward, mask, episode_done, next_observation))
+        
         if len(self.nstep_buffer) == self.n_step:
-            reward, next_obs, done, discount_step = self._get_n_step_info()
-            obs_, act, _, _, _, _ = self.nstep_buffer[0]
+            n_reward, n_next_obs, n_mask, n_discount_step = self._get_n_step_info()
+            obs_, act_, _, _, _, _ = self.nstep_buffer[0]
+            
             self.observations[:, self.insert_index] = obs_
-            self.actions[:, self.insert_index] = act
-            self.rewards[:, self.insert_index] = reward
-            self.masks[:, self.insert_index] = mask
-            self.dones_float[:, self.insert_index] = done
-            self.next_observations[:, self.insert_index] = next_obs
-            self.discount_steps[:, self.insert_index] = discount_step
+            self.actions[:, self.insert_index] = act_
+            self.rewards[:, self.insert_index] = n_reward
+            self.masks[:, self.insert_index] = n_mask
+            self.dones_float[:, self.insert_index] = done_float
+            self.next_observations[:, self.insert_index] = n_next_obs
+            self.discount_steps[:, self.insert_index] = n_discount_step
 
             self.insert_index = (self.insert_index + 1) % self.capacity
             self.size = min(self.size + 1, self.capacity)
             if self.insert_index == 0:
                 self.full = True
 
+    def _get_n_step_info(self):
+        _, _, last_reward, last_mask, last_ep_done, last_next_obs = self.nstep_buffer[-1]
+        
+        n_reward = last_reward
+        n_next_obs = last_next_obs
+        n_mask = last_mask
+        n_discount_step = np.ones_like(last_reward, dtype=np.int32)
+        
+        for _, _, reward, mask, ep_done, next_obs in reversed(list(self.nstep_buffer)[:-1]):
+            n_reward = np.where(ep_done, reward, reward + self.gamma * n_reward)
+            n_next_obs = np.where(ep_done[:, None], next_obs, n_next_obs)
+            n_mask = np.where(ep_done, mask, n_mask)
+            n_discount_step = np.where(ep_done, 1, n_discount_step + 1)
+            
+        return n_reward, n_next_obs, n_mask, n_discount_step
+
     def get_indx(self, batch_size: int):
         if self.size + self.n_step < self.capacity + 1:
-            indx = np.random.randint(self.size - self.n_step + 1, size=batch_size)
-        else:
-            indx = self.generate_excluded_random(size=batch_size)
-        return indx
+            return np.random.randint(self.size - self.n_step + 1, size=batch_size)
+        return self.generate_excluded_random(size=batch_size)
 
     def get_at_index(self, i) -> Batch:
         return Batch(
@@ -314,17 +329,6 @@ class NStepParallelReplayBuffer(AbstractReplayBuffer):
         if include_idx:
             return batch, indxs
         return batch
-
-    def _get_n_step_info(self):
-        _, _, rewards, _, dones, next_observations = self.nstep_buffer[-1]
-        discount_step = np.zeros_like(dones) + self.n_step
-        for _, _, reward, _, done, next_observation in reversed(list(self.nstep_buffer)[:-1]):
-            rewards = reward + self.gamma * rewards * (1 - done)
-            if done.any():
-                discount_step = np.where(done, discount_step - 1, discount_step)
-                next_observations = np.where(done[:, None], next_observation, next_observations)
-                dones = np.where(done, done, dones)
-        return rewards, next_observations, dones, discount_step
 
     def generate_excluded_random(self, size=1):
         valid_numbers = (
