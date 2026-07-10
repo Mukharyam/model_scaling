@@ -145,8 +145,9 @@ def update(
     next_log_probs = dist.log_prob(next_actions)
     next_q1, next_q2 = target_critic(batch.next_observations, next_actions, key=target_critic_key)
     next_q = (next_q1 + next_q2) / 2 - pessimism * jnp.abs(next_q1 - next_q2) / 2
-    target_q = batch.rewards + discount * batch.masks * next_q
-    target_q -= discount * temp() * batch.masks * next_log_probs
+    n_step_discount = jnp.power(discount, batch.discount_steps)
+    target_q = batch.rewards + n_step_discount * batch.masks * next_q
+    target_q -= n_step_discount * temp() * batch.masks * next_log_probs
 
     def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         critic_fn = lambda actions: critic.apply(
@@ -273,12 +274,13 @@ def update_quantile(
         batch.next_observations, next_actions, key=target_critic_key
     )
     next_q = (next_q1 + next_q2) / 2 - pessimism * jnp.abs(next_q1 - next_q2) / 2
+    n_step_discount = jnp.power(discount, batch.discount_steps)[..., None, None]
     target_q = (
         batch.rewards[..., None, None]
-        + discount * batch.masks[..., None, None] * next_q[:, None, :]
+        + n_step_discount * batch.masks[..., None, None] * next_q[:, None, :]
     )
     target_q -= (
-        discount * temp().mean() * batch.masks[..., None, None] * next_log_probs[..., None, None]
+        n_step_discount * temp().mean() * batch.masks[..., None, None] * next_log_probs[..., None, None]
     )
 
     def critic_loss_fn(quantile_critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
